@@ -94,17 +94,7 @@ def send_telegram(text):
 # ==========================================
 # 6. 主程式
 # ==========================================
-if __name__ == "__main__":
-    print("🚀 啟動全球熱點情報聚合器")
-    history = load_history()
-    
-    raw_pool = fetch_trending_news()
-    
-    # 過濾舊情報，找出全新的熱點
-    new_intel = [news for news in raw_pool if str(hash(news)) not in history]
-    
-    # 【測試模式】：為了讓你馬上看到成果，這裡把門檻設為 0。
-    # 測試成功後，可以把 >= 0 改為 >= 4，這樣只有在世界發生真正大新聞洗版時才會發送。
+# 【測試模式】：為了讓你馬上看到成果，這裡把門檻設為 0。
     if len(new_intel) >= 0:
         print(f"✅ 搜集到 {len(new_intel)} 筆全新熱點數據，交由 DeepSeek 撰寫中文報告...")
         
