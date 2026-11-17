@@ -1,7 +1,6 @@
 import os
 import requests
 import feedparser
-from datetime import datetime
 from bs4 import BeautifulSoup
 from openai import OpenAI
 
@@ -19,7 +18,8 @@ client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url="https://api.deepseek.com")
 # 2. 歷史紀錄防重複
 # ==========================================
 def load_history():
-    if not os.path.exists(SENT_LOG_FILE): return set()
+    if not os.path.exists(SENT_LOG_FILE):
+        return set()
     with open(SENT_LOG_FILE, "r", encoding="utf-8") as f:
         return set(line.strip() for line in f)
 
@@ -28,7 +28,7 @@ def save_history(text_hash):
         f.write(f"{text_hash}\n")
 
 # ==========================================
-# 3. 網頁內文爬蟲 (點進連結抓正文)
+# 3. 網頁內文爬蟲 (點進連結抓取正文)
 # ==========================================
 def fetch_article_content(url):
     headers = {
@@ -37,116 +37,123 @@ def fetch_article_content(url):
     try:
         response = requests.get(url, headers=headers, timeout=10)
         soup = BeautifulSoup(response.text, 'html.parser')
-        # 提取所有段落文字
         paragraphs = soup.find_all('p')
         full_text = "\n".join([p.get_text().strip() for p in paragraphs if len(p.get_text().strip()) > 30])
-        # 截取前 2500 個字元送給 AI，避免超出 token 限制或包含底部廣告
-        return full_text[:2500] if full_text else ""
+        # 每篇截取前 1200 字元，確保多篇文章合在一起不會超過 DeepSeek 上下文限制
+        return full_text[:1200] if full_text else ""
     except Exception as e:
         print(f"⚠️ 無法讀取網頁內文 ({url}): {e}")
         return ""
 
 # ==========================================
-# 4. 抓取全球金融與權威突發新聞
+# 4. 抓取全球權威與財經突發新聞
 # ==========================================
 def fetch_breaking_news():
     news_items = []
     sources = [
-        ("BBC", "http://feeds.bbci.co.uk/news/world/rss.xml"),
-        ("CNBC", "https://www.cnbc.com/id/10000664/device/rss/rss.html"),
-        ("CoinDesk", "https://www.coindesk.com/arc/outboundfeeds/rss/"),
-        ("Yahoo", "https://feeds.finance.yahoo.com/rss/2.0/headline?region=US&lang=en-US")
+        ("BBC World", "http://feeds.bbci.co.uk/news/world/rss.xml"),
+        ("CNBC 財經", "https://www.cnbc.com/id/10000664/device/rss/rss.html"),
+        ("CoinDesk 幣圈", "https://www.coindesk.com/arc/outboundfeeds/rss/"),
+        ("Yahoo 金融", "https://feeds.finance.yahoo.com/rss/2.0/headline?region=US&lang=en-US"),
+        ("Google 全球頭條", "https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en")
     ]
     for source_name, rss_url in sources:
         try:
             feed = feedparser.parse(rss_url)
-            # 每個來源抓最新 1 篇，確保每次總共最多處理 4 篇深度文章，避免執行超時
-            for entry in feed.entries[:1]:
+            for entry in feed.entries[:2]:
                 news_items.append({
                     "title": entry.title,
                     "link": entry.link,
                     "summary": entry.get("summary", ""),
                     "source": source_name
                 })
-        except:
-            pass
+        except Exception as e:
+            print(f"⚠️ RSS 讀取失敗 ({source_name}): {e}")
     return news_items
 
 # ==========================================
-# 5. DeepSeek 深度內文整理 (嚴格限制 200 字內)
+# 5. DeepSeek 全球趨勢首席分析師 (綜合白話解析版)
 # ==========================================
-def summarize_article_with_deepseek(item, article_text):
-    # 如果網頁有擋爬蟲抓不到內文，就退回使用 RSS 自帶的摘要與標題
-    source_material = article_text if len(article_text) > 100 else f"標題：{item['title']}\n摘要：{item['summary']}"
-    
+def analyze_combined_news(combined_news):
     prompt = f"""
-    你是一位專業的財經與國際新聞主編。請閱讀以下新聞內容，並為忙碌的讀者整理出一份高質素、容易理解的繁體中文精華摘要。
-    
-    【新聞來源】：{item['source']}
-    【原始資料】：
-    {source_material}
-    
-    【寫作要求】：
-    1. 內容必須包含：事件核心經過、背後的關鍵原因，以及對市場或大眾的潛在影響。
-    2. 語氣流暢自然，將複雜的財經或政治概念轉化為白話文，拒絕生硬的機翻感。
-    3. 嚴格控制總字數在「150 到 200 個繁體中文字」之間，絕對不可超過 200 字。
-    4. 直接輸出整理後的段落內容，不要加上「摘要：」、「字數統計」或任何開場白。
-    """
-    
+你現在是一位「全球趨勢首席分析師」。
+你具備將艱澀概念「深入淺出 (Layman explanation)」的頂級能力，能夠將複雜的國際局勢、市場邏輯，轉化為完全沒有背景的外行人也能輕鬆秒懂的白話文。
+
+以下是系統剛從全球權威媒體抓取到的「今日最火爆、最多人討論的頭條新聞」集合（包含標題與網頁內文摘要）：
+
+{combined_news}
+
+請你從中挑選出「1 到 2 件目前最具全球影響力的大事」進行高度整合，過濾掉不重要的雜訊。
+拒絕生硬的機器翻譯感，使用極度流暢、接地氣且排版清晰的繁體中文寫出一份趨勢簡報。
+
+簡報必須嚴格包含以下四個區塊，並使用 Emoji 作為標題：
+
+1. 🔥 今日全球頭條秒懂：用最簡單的 1-2 句話，告訴外行人現在世界發生了什麼最火爆的大事。
+2. 💡 專家白話解析：將這件大事背後的複雜概念、專有名詞或潛在原因，用日常生活的比喻解釋清楚，讓人一看就懂。
+3. 🗣️ 輿論與市場風向：綜合分析目前大眾、媒體或投資者對這件事的看法與情緒。
+4. 🔮 未來潛在影響：這件事接下來可能會對普通人的生活、經濟或國際局勢造成什麼影響？
+
+請確保文字流暢，段落分明，適合在手機上快速閱讀。不要在文中加入任何網址連結或特殊 Markdown 符號（如星號或井字號），以免影響手機閱讀體驗。
+"""
     try:
         res = client.chat.completions.create(
             model="deepseek-chat",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
-            max_tokens=400
+            temperature=0.35,
+            max_tokens=1200
         ).choices[0].message.content.strip()
         return res
     except Exception as e:
-        print(f"❌ DeepSeek 摘要失敗: {e}")
-        return item['title']
+        print(f"❌ DeepSeek 分析失敗: {e}")
+        return ""
 
 # ==========================================
-# 6. Telegram 獨立卡片推播
+# 6. Telegram 推播模組
 # ==========================================
 def send_telegram(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": text,
-        "parse_mode": "HTML",
         "disable_web_page_preview": True
     }
-    requests.post(url, data=payload)
+    response = requests.post(url, data=payload)
+    if response.status_code == 200:
+        print("📱 已成功發送趨勢簡報至 Telegram！")
+    else:
+        print(f"❌ Telegram 發送失敗 ({response.status_code}): {response.text}")
 
 # ==========================================
 # 7. 主程式
 # ==========================================
 if __name__ == "__main__":
-    print("🚀 啟動全球新聞深度爬蟲與 200 字精華整理...")
+    print("🚀 啟動全球趨勢雷達與深度分析引擎...")
     history = load_history()
     raw_news = fetch_breaking_news()
     
+    # 過濾掉已經處理過的舊新聞
     new_updates = [item for item in raw_news if str(hash(item['title'])) not in history]
     
-    if new_updates:
-        print(f"✅ 發現 {len(new_updates)} 則新文章，開始爬取內文並進行分析...")
+    # 門檻設定：至少累積 3 則新新聞才啟動整合分析（若要強制測試，可暫時將 3 改為 1）
+    if len(new_updates) >= 3:
+        print(f"✅ 發現 {len(new_updates)} 則全新頭條，正在爬取網頁內文...")
         
-        for item in new_updates:
-            print(f"🔍 正在讀取 [{item['source']}] {item['title']}...")
-            article_text = fetch_article_content(item['link'])
-            
-            # 交由 DeepSeek 整理成 200 字以內精華
-            digest_zh = summarize_article_with_deepseek(item, article_text)
-            
-            # 組合單篇新聞卡片
-            msg = (
-                f"📰 <b>[{item['source']}] 深度快訊</b>\n\n"
-                f"{digest_zh}\n\n"
-                f"🔗 <a href='{item['link']}'>查看原始報導</a>"
-            )
-            
-            send_telegram(msg)
-            print(f"📱 已發送 [{item['source']}] 精華摘要。")
-            save_history(str(hash(item['title'])))
+        compiled_articles = []
+        for item in new_updates[:6]:  # 最多抽取 6 篇進行深度爬取，兼顧速度與廣度
+            print(f"🔍 讀取內文: [{item['source']}] {item['title']}")
+            content = fetch_article_content(item['link'])
+            body = content if len(content) > 100 else item['summary']
+            compiled_articles.append(f"【來源：{item['source']}】\n標題：{item['title']}\n內文：{body}\n---")
+        
+        combined_news_text = "\n".join(compiled_articles)
+        
+        print("🧠 正在交由 DeepSeek 進行深度整合與白話文解析...")
+        final_briefing = analyze_combined_news(combined_news_text)
+        
+        if final_briefing:
+            send_telegram(final_briefing)
+            # 寫入歷史紀錄，避免重複分析同一批新聞
+            for item in new_updates:
+                save_history(str(hash(item['title'])))
     else:
-        print("⏭️ 暫無最新報導，略過執行。")
+        print(f"⏭️ 目前僅有 {len(new_updates)} 則零星新消息，尚未達到整合門檻，略過執行。")
