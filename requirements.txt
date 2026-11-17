@@ -1,4 +1,4 @@
-Plaintext
 requests
 feedparser
 openai
+beautifulsoup4
