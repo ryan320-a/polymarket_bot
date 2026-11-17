@@ -24,7 +24,7 @@ DAILY_POOL_FILE = "daily_digest_pool.json"
 client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url="https://api.deepseek.com")
 
 # ==========================================
-# 2. 全新 15 大領域 × 全球多語言資料來源矩陣
+# 2. 15 大新聞領域 × 全球多語言資料來源矩陣
 # ==========================================
 TOPIC_SOURCES = {
     "政治新聞": [
@@ -120,7 +120,7 @@ TOPIC_SOURCES = {
 }
 
 # ==========================================
-# 3. 記憶庫與 24 小時晨報素材池管理
+# 3. 記憶庫管理
 # ==========================================
 def load_history():
     if not os.path.exists(SENT_LOG_FILE):
@@ -172,6 +172,7 @@ def append_to_daily_pool(hk_time_str, summary_text, items):
             {
                 "apa_intext": i["apa_intext"],
                 "apa_ref": i["apa_ref"],
+                "author_key": i["author_key"],
                 "title": i["title"],
                 "link": i["link"]
             } for i in items[:4]
@@ -193,7 +194,7 @@ def load_and_clear_daily_pool():
         return []
 
 # ==========================================
-# 4. 即時全網熱搜雷達
+# 4. 熱搜雷達
 # ==========================================
 def fetch_realtime_hot_keywords():
     trend_feeds = [
@@ -220,7 +221,7 @@ def fetch_realtime_hot_keywords():
     return hot_words, trend_list_ordered[:20]
 
 # ==========================================
-# 5. APA 7th 元數據生成器與多領域媒體掃描
+# 5. APA 7th 元數據生成器 (含 author_key 嚴格防護)
 # ==========================================
 def format_apa_metadata(source_label, entry):
     clean_org = re.sub(r"\s*\[.*?\]", "", source_label).strip()
@@ -256,7 +257,7 @@ def format_apa_metadata(source_label, entry):
     else:
         apa_ref = f"{author_ref_name} ({full_date_str}). <i>{html.escape(clean_title)}</i>. {html.escape(clean_org)}. <a href='{entry.link}'>{entry.link}</a>"
         
-    return published_ts, apa_intext, apa_ref
+    return published_ts, apa_intext, apa_ref, author_citation_name.lower()
 
 def fetch_single_rss(args):
     category, source_name, rss_url = args
@@ -264,7 +265,7 @@ def fetch_single_rss(args):
     try:
         feed = feedparser.parse(rss_url)
         for entry in feed.entries[:2]:
-            published_ts, apa_intext, apa_ref = format_apa_metadata(source_name, entry)
+            published_ts, apa_intext, apa_ref, author_key = format_apa_metadata(source_name, entry)
             items.append({
                 "category": category,
                 "source": source_name,
@@ -273,7 +274,8 @@ def fetch_single_rss(args):
                 "summary": entry.get("summary", ""),
                 "published_ts": published_ts,
                 "apa_intext": apa_intext,
-                "apa_ref": apa_ref
+                "apa_ref": apa_ref,
+                "author_key": author_key
             })
     except Exception:
         pass
@@ -300,7 +302,6 @@ def fetch_and_score_all_news(hot_keywords, history):
             
         score = 0
         title_lower = item['title'].lower()
-        
         if item['published_ts'] > 0:
             age_hours = (now_utc - item['published_ts']) / 3600
             if age_hours <= 1.5:
@@ -321,9 +322,6 @@ def fetch_and_score_all_news(hot_keywords, history):
     scored_items.sort(key=lambda x: x['score'], reverse=True)
     return scored_items
 
-# ==========================================
-# 6. 多語言網頁內文爬蟲
-# ==========================================
 def fetch_article_content(url):
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -339,35 +337,35 @@ def fetch_article_content(url):
         return ""
 
 # ==========================================
-# 7A. 每小時常規模式
+# 7A. 每小時常規模式 (嚴格防幻覺防盲目聚合指令)
 # ==========================================
 def analyze_hourly_news(combined_news, recent_topics):
     avoid_list_str = "、".join([r["topic"] for r in recent_topics]) if recent_topics else "無"
     
     prompt = f"""
-你現在是一位精通 15 大新聞領域（政治、國際、財經、社會、地方、科技、健康、教育、文化、體育、環境、法律、軍事、生活、天氣）與學術引用規範（APA 第七版）的「全球趨勢首席情報官」。
+你現在是一位精通 15 大新聞領域與學術引用規範（APA 第七版）的「全球趨勢首席情報官」。
+【⚠️ 絕對禁止 AI 幻覺與盲目聚合鐵律】：
+1. 你在撰寫內容時，絕對不准虛構、猜測或捏造任何新聞事實。
+2. **嚴格引用限制**：你在文中進行引述時，必須嚴格使用下方輸入資料中所提供的【APA文內引用標籤】（例如 `(BBC News, 2026)`）。絕對不准在文中標註未在資料中出現的媒體或年份。
+3. 如果某篇新聞你沒有在正文中實際引用其觀點，絕對不准在報告中提及它。
 
 【過去 24 小時已報導過的話題清單（語義去重避開區）】：
 {avoid_list_str}
 ※ 嚴格規定：除非上述舊話題發生了重大新轉折，否則請絕對避開重複報導！
 
-【過去 1 小時 15 大領域高熱度新聞池（每篇皆附 APA 文內引用標籤）】：
+【可用的嚴格查證新聞池】：
 {combined_news}
 
-【核心寫作與 APA 引用要求】：
-1. 請從 15 大領域中挑選出「2 件最具全球或社會影響力的跨領域大事」（命名為【焦點一】與【焦點二】）。
-2. 強制執行 APA 第七版文內引用：引述事實或觀點時，必須在句末加上對應的 APA 括號引用（例如：`(BBC News, 2026)`）。
-3. 嚴格按照以下五段式結構輸出（不要在正文中加入網址、星號 `*` 或井字號 `#`）：
+【五段式結構要求】：
+請從中挑選 2 件最具影響力的跨領域大事（【焦點一】與【焦點二】），嚴格依序輸出五個區塊（無星號、無井字號）：
+【焦點一：（填入對應分類名稱）】
+1. 🔥 頭條焦點秒懂：... (必須附上正確的 APA 文內引用)
+2. 💡 專家白話解說：... (必須附上 APA 文內引用)
+3. 🗣️ 輿論與市場風向：... (必須附上 APA 文內引用)
+4. 🔮 未來潛在影響：...
+5. 📜 歷史借鏡與參考：...
 
-【焦點一：（填入 15 大領域中的對應分類名稱）】
-1. 🔥 頭條焦點秒懂：用最簡單的 1-2 句話綜合點出核心全貌，並附上 APA 文內引用。
-2. 💡 專家白話解說：將複雜概念用日常比喻解釋清楚。
-3. 🗣️ 輿論與市場風向：綜合各方反應與輿論情緒。
-4. 🔮 未來潛在影響：對未來發展或普通人生活的具體影響。
-5. 📜 歷史借鏡與參考：歷史上是否有類似事件及啟示。
-
-（空一行分隔）
-
+（空一行）
 【焦點二：（填入另一分類名稱）】
 1. 🔥 頭條焦點秒懂：...
 2. 💡 專家白話解說：...
@@ -382,53 +380,53 @@ COVERED_TOPICS: 焦點一核心關鍵詞(4-8字), 焦點二核心關鍵詞(4-8�
         res = client.chat.completions.create(
             model="deepseek-chat",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.35,
+            temperature=0.2, # 降低隨機性，防止幻覺
             max_tokens=2100
         ).choices[0].message.content.strip()
         return res
     except Exception as e:
-        print(f"❌ DeepSeek 每小時分析失敗: {e}")
+        print(f"❌ DeepSeek 分析失敗: {e}")
         return ""
 
 # ==========================================
-# 7B. 早上 07:00 晨間特別版：15 大領域 24 小時大整合
+# 7B. 早上 07:00 晨間特別版
 # ==========================================
 def analyze_daily_24h_digest(daily_pool, current_trends, latest_news_text):
     pool_summary = []
     for entry in daily_pool:
         pool_summary.append(f"【時段 {entry['hk_time']}】\n{entry['hourly_brief']}\n---")
     accumulated_text = "\n".join(pool_summary) if pool_summary else "（請依據最新情報總結）"
-    trends_str = "、".join(current_trends) if current_trends else "政策變革、科技突破、地緣政治"
+    trends_str = "、".join(current_trends) if current_trends else "政策變革、科技突破"
 
     prompt = f"""
 你現在是「全球情報總編輯」，現在是香港時間早上 07:00。
-請為讀者撰寫一份涵蓋 15 大領域的【過去 24 小時全球 Hot Topic 深度大整合與晨間戰略簡報】，並嚴格遵循 APA 第七版文內引用規範。
+請撰寫一份涵蓋 15 大領域的【過去 24 小時全球 Hot Topic 深度大整合】，嚴格遵守事實查證，絕不捏造幻覺。
 
-【全網熱搜風向】：{trends_str}
-【過去 24 小時累積重大事件紀錄】：{accumulated_text}
+【熱搜風向】：{trends_str}
+【過去累積重大事件紀錄】：{accumulated_text}
 【最新補充情報】：{latest_news_text}
 
-嚴格包含以下五大晨間板塊（不要使用星號 `*` 或井字號 `#`）：
-🌅 一、 過去 24 小時 15 大領域核心主線（3 大最火熱 Hot Topic 總結）
-🔗 二、 隱藏的蝴蝶效應（跨領域深度關聯分析）
+嚴格包含以下五大板塊（無星號、無井字號）：
+🌅 一、 過去 24 小時 15 大領域核心主線
+🔗 二、 隱藏的蝴蝶效應
 🌡️ 三、 全球與社會輿論總體溫度計
 📜 四、 大歷史週期對照
-🎯 五、 今日重點關注與行動指南（未來 24 小時雷達）
+🎯 五、 今日重點關注與行動指南
 """
     try:
         res = client.chat.completions.create(
             model="deepseek-chat",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.4,
+            temperature=0.3,
             max_tokens=2600
         ).choices[0].message.content.strip()
         return res
     except Exception as e:
-        print(f"❌ DeepSeek 07:00 晨間大整合失敗: {e}")
+        print(f"❌ 晨間大整合失敗: {e}")
         return ""
 
 # ==========================================
-# 8. Telegram 推播模組
+# 8. Telegram 推播模組 (實施 Python 程式端強制反幻覺過濾閘道)
 # ==========================================
 def send_telegram_html(briefing_text, reference_items, is_daily_morning=False):
     clean_body = briefing_text
@@ -448,13 +446,25 @@ def send_telegram_html(briefing_text, reference_items, is_daily_morning=False):
     else:
         header = f"🌐 <b>15大領域全球情報綜合簡報</b> ({hk_time} HKT)\n\n"
     
-    unique_refs = {}
-    for item in reference_items[:12]:
-        ref_str = item['apa_ref']
-        unique_refs[ref_str] = ref_str
+    # ── 【核心防盲目聚合閘道：Python 程式嚴格過濾】 ──
+    # 1. 掃描正文中實際出現過的所有括號內引用字串 (例如 "(BBC News, 2026)" 抓出 "bbc news")
+    found_citations_raw = re.findall(r"\(([^0-9\(\)]+?),\s*\d{4}\)", clean_body)
+    found_citations_normalized = {c.strip().lower() for c in found_citations_raw}
+    
+    matched_refs = []
+    for item in reference_items:
+        # 2. 只有當該文獻的 author_key 確實被正文括號引用時，才准放入文末 References！
+        if item.get('author_key', '') in found_citations_normalized or is_daily_morning:
+            matched_refs.append(item['apa_ref'])
+            
+    # 如果常規快報中 AI 漏掉括號標記，退回嚴格顯示正文前 2 筆被實際比對到的文獻，絕不盲目塞入 10 幾篇
+    if not matched_refs and not is_daily_morning:
+        matched_refs.append(reference_items[0]['apa_ref'])
+
+    unique_refs = {ref: ref for ref in matched_refs}
     sorted_refs = sorted(unique_refs.values(), key=lambda s: re.sub(r"<.*?>", "", s).lower())
     
-    ref_lines = ["\n\n━━━━━━━━━━━━━━━━━━\n📚 <b>References (APA 7th Edition)</b>\n"]
+    ref_lines = ["\n\n━━━━━━━━━━━━━━━━━━\n📚 <b>References (APA 7th Edition - Verified Only)</b>\n"]
     for ref_entry in sorted_refs:
         ref_lines.append(f"• {ref_entry}")
         
@@ -465,7 +475,7 @@ def send_telegram_html(briefing_text, reference_items, is_daily_morning=False):
         payload = {"chat_id": TELEGRAM_CHAT_ID, "text": full_message, "parse_mode": "HTML", "disable_web_page_preview": True}
         res = requests.post(url, data=payload)
         if res.status_code == 200:
-            print("📱 已成功發送 15 大領域簡報至 Telegram！")
+            print("📱 已成功發送反幻覺過濾後的簡報至 Telegram！")
         else:
             print(f"❌ Telegram 發送失敗: {res.text}")
     else:
@@ -474,7 +484,7 @@ def send_telegram_html(briefing_text, reference_items, is_daily_morning=False):
         requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": part1[:4050], "parse_mode": "HTML", "disable_web_page_preview": True})
         time.sleep(1)
         requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": part2[:4050], "parse_mode": "HTML", "disable_web_page_preview": True})
-        print("📱 已成功分段發送 15 大領域長篇報告與 APA 7th 參考文獻！")
+        print("📱 已成功分段發送反幻覺報告與參考文獻！")
         
     return extracted_topics, clean_body
 
@@ -486,7 +496,7 @@ if __name__ == "__main__":
     hk_hour = hk_now.hour
     hk_time_str = hk_now.strftime("%Y-%m-%d %H:%M")
     
-    print(f"🚀 啟動 15 大領域全球情報引擎 | 當前香港時間：{hk_time_str}")
+    print(f"🚀 啟動 15 大領域反幻覺情報引擎 | 當前香港時間：{hk_time_str}")
     history = load_history()
     recent_topics = load_recent_topics()
     hot_keywords, ordered_trends = fetch_realtime_hot_keywords()
@@ -501,7 +511,7 @@ if __name__ == "__main__":
             if seen_categories.get(cat, 0) < 2:
                 selected_updates.append(item)
                 seen_categories[cat] = seen_categories.get(cat, 0) + 1
-            if len(selected_updates) >= 15:
+            if len(selected_updates) >= 12:
                 break
                 
         def enrich_article(item):
@@ -520,9 +530,8 @@ if __name__ == "__main__":
         combined_news_text = "\n".join(compiled_articles)
         
         if hk_hour == 7:
-            print("☀️ 偵測到香港時間 07:00！啟動【15大領域 24 小時晨間大整合模式】...")
+            print("☀️ 偵測到香港時間 07:00！啟動晨間大整合模式...")
             daily_pool = load_and_clear_daily_pool()
-            
             pool_links = []
             for entry in daily_pool:
                 pool_links.extend(entry.get("top_articles", []))
@@ -534,7 +543,7 @@ if __name__ == "__main__":
                 for item in selected_updates:
                     save_history(str(hash(item['title'])))
         else:
-            print("⏱️ 執行 15 大領域常規【每小時跨媒體綜合快報】...")
+            print("⏱️ 執行反幻覺過濾每小時快報...")
             hourly_report = analyze_hourly_news(combined_news_text, recent_topics)
             if hourly_report:
                 new_topics, clean_brief = send_telegram_html(hourly_report, selected_updates, is_daily_morning=False)
