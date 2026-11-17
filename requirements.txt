@@ -1,5 +1,4 @@
-feedparser
+Plaintext
 requests
+feedparser
 openai
-newsapi-python
-beautifulsoup4
