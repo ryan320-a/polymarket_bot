@@ -6,9 +6,9 @@ from openai import OpenAI
 # ==========================================
 # 1. 系統變數與 API 設置
 # ==========================================
-DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "你的_DEEPSEEK_KEY")
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "你的_TG_TOKEN")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "你的_CHAT_ID")
+DEEPSEEK_API_KEY = "sk-517d8baa3a174590a5a8bedfe5b3b236"
+TELEGRAM_TOKEN = "9106778418:AAEDd0O_Wpwd7rAojcaOodlAVdDzjP1G0r8"
+TELEGRAM_CHAT_ID = "1290187511"
 
 client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url="https://api.deepseek.com")
 SENT_LOG_FILE = "sent_news.txt"
