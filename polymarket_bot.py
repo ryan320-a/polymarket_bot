@@ -94,8 +94,8 @@ def send_telegram(text):
 # ==========================================
 # 6. 主程式
 # ==========================================
-# 【測試模式】：為了讓你馬上看到成果，這裡把門檻設為 0。
-    if len(new_intel) >= 0:
+# 【正式模式】：設定至少要抓到 3 篇全新且重複討論的重大新聞，才值得驚動分析師寫報告
+    if len(new_intel) >= 3:
         print(f"✅ 搜集到 {len(new_intel)} 筆全新熱點數據，交由 DeepSeek 撰寫中文報告...")
         
         final_report = analyze_trending_news(new_intel)
@@ -103,8 +103,8 @@ def send_telegram(text):
         send_telegram(final_report)
         print("📱 已發送熱點簡報至 Telegram。")
         
-        # 【測試模式】：暫時註解掉歷史紀錄，方便你重複按 Run 測試
-        # for intel in new_intel:
-        #     save_history(str(hash(intel)))
+        # 【正式模式】：寫入歷史紀錄，確保下個小時不會重複發同一件事
+        for intel in new_intel:
+            save_history(str(hash(intel)))
     else:
-        print("⏭️ 目前熱點新聞尚未大幅更新，略過發送。")
+        print("⏭️ 只有零星新消息，尚未形成全球重大焦點，略過分析不發送。")
