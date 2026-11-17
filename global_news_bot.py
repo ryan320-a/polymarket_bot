@@ -1,23 +1,29 @@
 import os
-import random
+import re
+import json
+import html
+import time
 import requests
 import feedparser
+from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 from bs4 import BeautifulSoup
 from openai import OpenAI
 
 # ==========================================
-# 1. API 與系統設定
+# 1. API 與系統設定 (優先讀取 GitHub Secrets)
 # ==========================================
-DEEPSEEK_API_KEY = "sk-517d8baa3a174590a5a8bedfe5b3b236"
-TELEGRAM_TOKEN = "9106778418:AAEDd0O_Wpwd7rAojcaOodlAVdDzjP1G0r8"
-TELEGRAM_CHAT_ID = "1290187511"
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY") or "sk-517d8baa3a174590a5a8bedfe5b3b236"
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN") or "9106778418:AAEDd0O_Wpwd7rAojcaOodlAVdDzjP1G0r8"
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID") or "1290187511"
+
 SENT_LOG_FILE = "sent_global_news.txt"
+TOPIC_MEMORY_FILE = "covered_topics.json"
 
 client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url="https://api.deepseek.com")
 
 # ==========================================
-# 2. 五大領域 × 20 個全球多語言資料來源 (涵蓋英/日/韓/法/德/西/阿/葡/俄/中)
+# 2. 五大領域 × 20 個全球多語言資料來源 (共 100 源)
 # ==========================================
 TOPIC_SOURCES = {
     "國際政經與突發": [
@@ -133,7 +139,7 @@ TOPIC_SOURCES = {
 }
 
 # ==========================================
-# 3. 歷史紀錄防重複
+# 3. 24小時語義話題記憶 & 網址去重模組
 # ==========================================
 def load_history():
     if not os.path.exists(SENT_LOG_FILE):
@@ -145,102 +151,193 @@ def save_history(text_hash):
     with open(SENT_LOG_FILE, "a", encoding="utf-8") as f:
         f.write(f"{text_hash}\n")
 
+def load_recent_topics():
+    """讀取過去 24 小時內已經報導過的核心事件標籤"""
+    if not os.path.exists(TOPIC_MEMORY_FILE):
+        return []
+    try:
+        with open(TOPIC_MEMORY_FILE, "r", encoding="utf-8") as f:
+            records = json.load(f)
+        cutoff = time.time() - 24 * 3600
+        valid_records = [r for r in records if r.get("timestamp", 0) > cutoff]
+        return valid_records
+    except Exception:
+        return []
+
+def save_new_topics(new_topic_labels):
+    """將本次已報導的事件寫入 24 小時語義記憶庫"""
+    records = load_recent_topics()
+    now = time.time()
+    for label in new_topic_labels:
+        if label.strip():
+            records.append({"topic": label.strip(), "timestamp": now})
+    with open(TOPIC_MEMORY_FILE, "w", encoding="utf-8") as f:
+        json.dump(records, f, ensure_ascii=False, indent=2)
+
 # ==========================================
-# 4. 多語言網頁內文爬蟲 (點進連結抓取正文)
+# 4. 即時全網熱搜雷達 (Google Trends 多國熱搜 + 科技熱詞)
+# ==========================================
+def fetch_realtime_hot_keywords():
+    """自動抓取全球多國過去 1 小時飆升搜尋關鍵字，作為動態加權依據"""
+    trend_feeds = [
+        "https://trends.google.com/trending/rss?geo=US", # 美國熱搜
+        "https://trends.google.com/trending/rss?geo=HK", # 香港熱搜
+        "https://trends.google.com/trending/rss?geo=JP", # 日本熱搜
+        "https://trends.google.com/trending/rss?geo=GB", # 英國熱搜
+    ]
+    hot_words = set()
+    for url in trend_feeds:
+        try:
+            feed = feedparser.parse(url)
+            for entry in feed.entries[:10]:
+                word = entry.title.strip().lower()
+                if len(word) >= 2:
+                    hot_words.add(word)
+        except Exception:
+            pass
+    # 額外加入固定高價值核心追蹤詞
+    core_boost = {"ai", "openai", "nvidia", "fed", "bitcoin", "btc", "rate", "tsmc", "trump", "china", "eu"}
+    hot_words.update(core_boost)
+    print(f"🔥 本小時全網熱搜加權關鍵字庫已載入 ({len(hot_words)} 個熱詞)")
+    return hot_words
+
+# ==========================================
+# 5. 全量掃描 100 大多語言媒體 & 過去 1 小時熱度篩選
+# ==========================================
+def fetch_single_rss(args):
+    category, source_name, rss_url = args
+    items = []
+    try:
+        feed = feedparser.parse(rss_url)
+        # 每個媒體抓取最新 2 則，以捕捉過去 1 小時內的多源交叉報導
+        for entry in feed.entries[:2]:
+            published_ts = 0
+            if hasattr(entry, 'published_parsed') and entry.published_parsed:
+                published_ts = time.mktime(entry.published_parsed)
+            items.append({
+                "category": category,
+                "source": source_name,
+                "title": entry.title,
+                "link": entry.link,
+                "summary": entry.get("summary", ""),
+                "published_ts": published_ts
+            })
+    except Exception:
+        pass
+    return items
+
+def fetch_and_score_all_news(hot_keywords, history):
+    tasks = []
+    for category, sources in TOPIC_SOURCES.items():
+        for source_name, rss_url in sources:
+            tasks.append((category, source_name, rss_url))
+            
+    all_raw = []
+    # 25 線程並行掃描全部 100 個全球來源，約 6-8 秒完成
+    with ThreadPoolExecutor(max_workers=25) as executor:
+        results = executor.map(fetch_single_rss, tasks)
+        for res_list in results:
+            all_raw.extend(res_list)
+            
+    now_utc = time.time()
+    scored_items = []
+    
+    for item in all_raw:
+        # 排除已經抓過的完全相同網址/標題
+        if str(hash(item['title'])) in history:
+            continue
+            
+        score = 0
+        title_lower = item['title'].lower()
+        
+        # 1. 時效性加分：過去 2 小時內發布的新聞給予高權重
+        if item['published_ts'] > 0:
+            age_hours = (now_utc - item['published_ts']) / 3600
+            if age_hours <= 1.5:
+                score += 10
+            elif age_hours <= 4:
+                score += 5
+                
+        # 2. 熱搜關鍵字加權：命中 Google Trends 當下熱搜詞大幅加分
+        matched_trends = [kw for kw in hot_keywords if kw in title_lower]
+        if matched_trends:
+            score += 8 * len(matched_trends)
+            item['matched_trends'] = matched_trends
+        else:
+            item['matched_trends'] = []
+            
+        item['score'] = score
+        scored_items.append(item)
+        
+    # 依熱度與時效總分由高至低排序
+    scored_items.sort(key=lambda x: x['score'], reverse=True)
+    return scored_items
+
+# ==========================================
+# 6. 多語言網頁內文爬蟲
 # ==========================================
 def fetch_article_content(url):
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
     try:
-        response = requests.get(url, headers=headers, timeout=8)
-        # 自動偵測多國語言網頁編碼 (避免日文、韓文、俄文、阿文出現亂碼)
+        response = requests.get(url, headers=headers, timeout=7)
         response.encoding = response.apparent_encoding
         soup = BeautifulSoup(response.text, 'html.parser')
         paragraphs = soup.find_all('p')
-        # 針對中日韓等無空格語言，放寬段落長度過濾條件至 15 字元
         full_text = "\n".join([p.get_text().strip() for p in paragraphs if len(p.get_text().strip()) > 15])
-        return full_text[:800] if full_text else ""
+        return full_text[:750] if full_text else ""
     except Exception:
         return ""
 
 # ==========================================
-# 5. 多線程並發抓取全球多語言來源
+# 7. DeepSeek 跨媒體綜合研判與語義去重引擎
 # ==========================================
-def fetch_single_rss(args):
-    category, source_name, rss_url = args
-    try:
-        feed = feedparser.parse(rss_url)
-        if feed.entries:
-            entry = feed.entries[0]
-            return {
-                "category": category,
-                "source": source_name,
-                "title": entry.title,
-                "link": entry.link,
-                "summary": entry.get("summary", "")
-            }
-    except Exception:
-        pass
-    return None
-
-def fetch_all_topics_news():
-    tasks = []
-    for category, sources in TOPIC_SOURCES.items():
-        # 每次從每個主題的 20 個多語言來源中隨機抽取 6 個，確保涵蓋歐美、日韓、中東、拉美等不同語言新聞
-        sampled_sources = random.sample(sources, min(6, len(sources)))
-        for source_name, rss_url in sampled_sources:
-            tasks.append((category, source_name, rss_url))
-            
-    news_items = []
-    with ThreadPoolExecutor(max_workers=15) as executor:
-        results = executor.map(fetch_single_rss, tasks)
-        for res in results:
-            if res:
-                news_items.append(res)
-    return news_items
-
-# ==========================================
-# 6. DeepSeek 多語言情報破譯與首席分析師 (獨立事件五段式深度結構)
-# ==========================================
-def analyze_combined_news(combined_news):
+def analyze_and_synthesize(combined_news, recent_topics):
+    avoid_list_str = "、".join([r["topic"] for r in recent_topics]) if recent_topics else "無（這是今日首次播報）"
+    
     prompt = f"""
-你現在是一位精通全球多國語言與世界歷史的「全球趨勢首席分析師」。
-你具備將艱澀概念「深入淺出 (Layman explanation)」的頂級能力，能夠直接閱讀並翻譯日文、韓文、法文、德文、西班牙文、阿拉伯文、俄文、葡萄牙文及英文等各國第一手媒體情報，轉化為完全沒有背景的外行人也能輕鬆秒懂的繁體中文白話文。
+你現在是一位精通全球 10 國語言與世界歷史的「全球趨勢首席情報官」。
+你的核心任務是進行「跨媒體情報聚類與深度綜合」——將多家不同國家、不同語言媒體對同一事件的報導融會貫通，轉化為外行人也能輕鬆秒懂的繁體中文白話簡報。
 
-以下是系統剛從五大領域（國際政經、華爾街與全球財經、前沿科技AI、科學醫療、加密貨幣Web3）全球各國權威媒體抓取到的「多語言最新頭條與內文摘要」集合：
+【重要：過去 24 小時已報導過的話題清單（語義去重避開區）】：
+{avoid_list_str}
+※ 嚴格規定：除非上述舊話題在過去 1 小時發生了「顛覆性的重大新轉折」，否則請**絕對避開**重複報導上述事件！請從下方新聞池中挖掘**全新的焦點事件**。
 
+【過去 1 小時全球 100 大多語言媒體高熱度新聞池（已按全網熱搜關鍵字加權排序）】：
 {combined_news}
 
-【核心任務要求】：
-1. 請自動翻譯並破譯上述各國語言的原始資料，從中挑選出「2 件不同領域、且最具全球影響力或獨特地區視角的大事」（分別命名為【焦點一】與【焦點二】，務必跨領域平衡，並優先挖掘非英語系國家媒體報導的重要趨勢）。
-2. 拒絕生硬的機器翻譯感，使用極度流暢、接地氣且排版清晰的繁體中文撰寫。
-3. 必須嚴格按照「先完整解析完第一件大事（1至5點），再完整解析第二件大事（1至5點）」的獨立單元順序輸出，嚴格包含以下五個區塊與 Emoji 標題：
+【核心寫作要求】：
+1. 請自動掃描上述各國語言情報，找出「目前最多家媒體同時報導、或熱搜權重最高的 2 件全新跨領域大事」（命名為【焦點一】與【焦點二】）。如果有多家不同媒體（例如同時有美媒、日媒、德媒）報導同一件事，請將這幾家媒體的觀點與細節**高度綜合**在一起寫！
+2. 拒絕生硬機翻感，使用極度流暢、接地氣的繁體中文撰寫。
+3. 嚴格按照以下獨立單元五段式結構輸出（不要在正文中加入任何網址、星號 `*` 或井字號 `#`）：
 
-【焦點一：（請填入該領域名稱與情報來源媒體）】
-1. 🔥 頭條焦點秒懂：用最簡單的 1-2 句話，直接點出這件事的核心內容。
-2. 💡 專家白話解說：將這件事背後的複雜概念、專有名詞或科學/商業原理，用日常生活的比喻解釋清楚，讓人一看就懂。
-3. 🗣️ 輿論與市場風向：綜合分析目前各國大眾、科技界、媒體或投資者對這件事的看法與情緒。
+【焦點一：（填入領域名稱，並列出本次綜合參考的幾家媒體名稱）】
+1. 🔥 頭條焦點秒懂：用最簡單的 1-2 句話，綜合多家媒體報導，點出這件事的核心全貌。
+2. 💡 專家白話解說：將這件事背後的複雜概念、專有名詞或科學/商業原理，用日常生活的比喻解釋清楚。
+3. 🗣️ 輿論與市場風向：綜合比較各國媒體（如歐美與亞洲視角）及市場投資者對這件事的看法與情緒。
 4. 🔮 未來潛在影響：這件事接下來可能會對普通人的日常生活、工作型態、健康或經濟造成什麼具體影響？
-5. 📜 歷史借鏡與參考：在人類歷史或過去幾十年的商業/金融/科技史上，有沒有發生過類似的事件？當時的發展軌跡與最終結局是什麼，能給我們什麼啟示？
+5. 📜 歷史借鏡與參考：在人類歷史或過去幾十年的商業/金融/科技史上，有沒有類似的事件？當時的結局能給我們什麼啟示？
 
-（請空一行分隔）
+（空一行分隔）
 
-【焦點二：（請填入另一領域名稱與情報來源媒體）】
+【焦點二：（填入另一領域名稱，並列出本次綜合參考的幾家媒體名稱）】
 1. 🔥 頭條焦點秒懂：...
 2. 💡 專家白話解說：...
 3. 🗣️ 輿論與市場風向：...
 4. 🔮 未來潛在影響：...
 5. 📜 歷史借鏡與參考：...
 
-請確保文字流暢，段落分明，適合在手機上快速閱讀。不要在文中加入任何網址連結或特殊 Markdown 符號（如星號或井字號），以免影響手機閱讀體驗。
+---
+【系統記憶標籤】（此行非常重要，請務必在最底部輸出這一行，供程式寫入 24 小時防重複記憶庫，格式嚴格如下）：
+COVERED_TOPICS: 焦點一核心關鍵詞(4-8字), 焦點二核心關鍵詞(4-8字)
 """
     try:
         res = client.chat.completions.create(
             model="deepseek-chat",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.4,
-            max_tokens=1800
+            temperature=0.35,
+            max_tokens=2000
         ).choices[0].message.content.strip()
         return res
     except Exception as e:
@@ -248,60 +345,103 @@ def analyze_combined_news(combined_news):
         return ""
 
 # ==========================================
-# 7. Telegram 推播模組
+# 8. Telegram HTML 安全推播 (附底部原文超連結清單)
 # ==========================================
-def send_telegram(text):
+def send_telegram_html(briefing_text, reference_items):
+    # 1. 分離出 AI 生成的記憶標籤，不顯示給使用者看
+    clean_body = briefing_text
+    extracted_topics = []
+    
+    match = re.search(r"COVERED_TOPICS:\s*(.+)", briefing_text)
+    if match:
+        raw_topics = match.group(1)
+        extracted_topics = [t.strip() for t in re.split(r"[,，、]", raw_topics) if t.strip()]
+        clean_body = briefing_text[:match.start()].strip()
+
+    # 2. 對正文進行 HTML 特殊字元轉義，防止 < > & 導致發送失敗
+    safe_body = html.escape(clean_body)
+    
+    # 3. 組合頂部時間標記與底部原文超連結清單
+    hk_time = (datetime.utcnow() + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M")
+    header = f"🌐 <b>全球多語言情報綜合簡報</b> ({hk_time} HKT)\n\n"
+    
+    ref_lines = ["\n\n━━━━━━━━━━━━━━━━━━\n📎 <b>本期綜合分析原文超連結清單：</b>"]
+    for idx, item in enumerate(reference_items, 1):
+        safe_title = html.escape(item['title'])
+        safe_source = html.escape(item['source'])
+        ref_lines.append(f"{idx}. [{safe_source}] <a href='{item['link']}'>{safe_title}</a>")
+        
+    full_message = header + safe_body + "\n".join(ref_lines)
+    
+    # 若超過 Telegram 4096 字元上限則安全截斷參考清單
+    if len(full_message) > 4050:
+        full_message = full_message[:4000] + "\n...(部分連結已省略)"
+
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
-        "text": text,
+        "text": full_message,
+        "parse_mode": "HTML",
         "disable_web_page_preview": True
     }
     response = requests.post(url, data=payload)
     if response.status_code == 200:
-        print("📱 已成功發送全球多語言趨勢簡報至 Telegram！")
+        print("📱 已成功發送綜合趨勢簡報與原文連結至 Telegram！")
+        return extracted_topics
     else:
         print(f"❌ Telegram 發送失敗 ({response.status_code}): {response.text}")
+        return []
 
 # ==========================================
-# 8. 主程式
+# 9. 主程式
 # ==========================================
 if __name__ == "__main__":
-    print("🚀 啟動全球多語言（10國語言×100大媒體）趨勢雷達...")
+    print("🚀 啟動全球熱搜加權 + 100 大多語言媒體跨源綜合雷達...")
     history = load_history()
-    raw_news = fetch_all_topics_news()
+    recent_topics = load_recent_topics()
+    print(f"🧠 已載入過去 24 小時語義防重複記憶：{len(recent_topics)} 個已報導事件")
     
-    new_updates = [item for item in raw_news if str(hash(item['title'])) not in history]
+    # 1. 獲取即時熱搜關鍵字
+    hot_keywords = fetch_realtime_hot_keywords()
     
-    if len(new_updates) >= 4:
-        print(f"✅ 發現 {len(new_updates)} 則來自世界各地的新頭條，正在挑選並破譯網頁內文...")
-        
-        # 確保每個領域至少挑選 1-2 篇最新文章，且盡量保留不同語言來源
+    # 2. 全量掃描 100 個多語言媒體並按熱度/時效評分
+    ranked_news = fetch_and_score_all_news(hot_keywords, history)
+    
+    if ranked_news:
+        # 挑選分數最高的前 14 篇跨領域新聞（讓同一事件的多家媒體報導有機會同時入選以便綜合）
         selected_updates = []
         seen_categories = {}
-        for item in new_updates:
+        for item in ranked_news:
             cat = item['category']
-            if seen_categories.get(cat, 0) < 2:
+            if seen_categories.get(cat, 0) < 4:
                 selected_updates.append(item)
                 seen_categories[cat] = seen_categories.get(cat, 0) + 1
-            if len(selected_updates) >= 10:
+            if len(selected_updates) >= 14:
                 break
                 
-        compiled_articles = []
-        for item in selected_updates:
-            print(f"🔍 讀取多語言內文: [{item['category']} - {item['source']}] {item['title']}")
+        print(f"✅ 鎖定 {len(selected_updates)} 篇高熱度多國報導，正在並行爬取內文...")
+        
+        # 並行爬取這 14 篇文章的網頁正文
+        def enrich_article(item):
             content = fetch_article_content(item['link'])
             body = content if len(content) > 50 else item['summary']
-            compiled_articles.append(f"【主題：{item['category']} | 媒體與語種：{item['source']}】\n原文標題：{item['title']}\n原文內文：{body}\n---")
-        
+            trend_tag = f" [命中熱搜: {','.join(item['matched_trends'])}]" if item['matched_trends'] else ""
+            return f"【主題：{item['category']} | 媒體：{item['source']}{trend_tag}】\n原文標題：{item['title']}\n原文內文：{body}\n---"
+
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            compiled_articles = list(executor.map(enrich_article, selected_updates))
+            
         combined_news_text = "\n".join(compiled_articles)
         
-        print("🧠 正在交由 DeepSeek 進行多語言翻譯、跨領域整合與白話文解析...")
-        final_briefing = analyze_combined_news(combined_news_text)
+        print("🧠 正在交由 DeepSeek 進行跨媒體綜合、語義去重與五段式白話解析...")
+        final_briefing = analyze_and_synthesize(combined_news_text, recent_topics)
         
         if final_briefing:
-            send_telegram(final_briefing)
+            new_covered_topics = send_telegram_html(final_briefing, selected_updates)
+            if new_covered_topics:
+                save_new_topics(new_covered_topics)
+                print(f"💾 已將新事件寫入 24 小時語義記憶庫：{new_covered_topics}")
             for item in selected_updates:
                 save_history(str(hash(item['title'])))
     else:
-        print(f"⏭️ 目前僅有 {len(new_updates)} 則零星新消息，尚未達到整合門檻，略過執行。")
+        print("⏭️ 暫無新進新聞，本小時略過。")
