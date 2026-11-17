@@ -2,7 +2,7 @@ name: Global News Translator
 
 on:
   schedule:
-    - cron: '0 * * * *' # 每小時整點執行一次 (一天共 24 次)
+    - cron: '0 * * * *' # 每小時整點執行一次
   workflow_dispatch:
 
 jobs:
@@ -11,14 +11,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 建立專屬的新聞歷史紀錄暫存，避免重複發送
-      - name: Cache sent global news history
+      # 同時快取「網址去重紀錄」與「24小時語義話題記憶庫」
+      - name: Cache news history and topic memory
         uses: actions/cache@v4
         with:
-          path: sent_global_news.txt
-          key: global-news-history-${{ runner.os }}-${{ github.run_id }}
+          path: |
+            sent_global_news.txt
+            covered_topics.json
+          key: global-news-memory-${{ runner.os }}-${{ github.run_id }}
           restore-keys: |
-            global-news-history-${{ runner.os }}-
+            global-news-memory-${{ runner.os }}-
 
       - name: Set up Python
         uses: actions/setup-python@v5
