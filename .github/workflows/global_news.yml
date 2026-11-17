@@ -2,7 +2,7 @@ name: Global News Translator
 
 on:
   schedule:
-    - cron: '*/15 * * * *' # 每 15 分鐘執行一次
+    - cron: '0 * * * *' # 每小時整點執行一次 (一天共 24 次)
   workflow_dispatch:
 
 jobs:
