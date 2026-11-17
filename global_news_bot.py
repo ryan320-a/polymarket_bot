@@ -11,7 +11,7 @@ from bs4 import BeautifulSoup
 from openai import OpenAI
 
 # ==========================================
-# 1. API 與系統設定
+# 1. API 與系統設定 (優先從環境變數讀取 GitHub Secrets)
 # ==========================================
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY") or "sk-517d8baa3a174590a5a8bedfe5b3b236"
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN") or "9106778418:AAEDd0O_Wpwd7rAojcaOodlAVdDzjP1G0r8"
@@ -221,7 +221,7 @@ def fetch_realtime_hot_keywords():
     return hot_words, trend_list_ordered[:20]
 
 # ==========================================
-# 5. APA 7th 元數據生成器 (含 author_key 嚴格防護)
+# 5. APA 7th 元數據生成器
 # ==========================================
 def format_apa_metadata(source_label, entry):
     clean_org = re.sub(r"\s*\[.*?\]", "", source_label).strip()
@@ -337,7 +337,7 @@ def fetch_article_content(url):
         return ""
 
 # ==========================================
-# 7A. 每小時常規模式 (嚴格防幻覺防盲目聚合指令)
+# 7A. 每小時常規模式
 # ==========================================
 def analyze_hourly_news(combined_news, recent_topics):
     avoid_list_str = "、".join([r["topic"] for r in recent_topics]) if recent_topics else "無"
@@ -345,23 +345,21 @@ def analyze_hourly_news(combined_news, recent_topics):
     prompt = f"""
 你現在是一位精通 15 大新聞領域與學術引用規範（APA 第七版）的「全球趨勢首席情報官」。
 【⚠️ 絕對禁止 AI 幻覺與盲目聚合鐵律】：
-1. 你在撰寫內容時，絕對不准虛構、猜測或捏造任何新聞事實。
-2. **嚴格引用限制**：你在文中進行引述時，必須嚴格使用下方輸入資料中所提供的【APA文內引用標籤】（例如 `(BBC News, 2026)`）。絕對不准在文中標註未在資料中出現的媒體或年份。
-3. 如果某篇新聞你沒有在正文中實際引用其觀點，絕對不准在報告中提及它。
+1. 絕對不准虛構、猜測或捏造任何新聞事實。
+2. 必須嚴格使用下方輸入資料中所提供的【APA文內引用標籤】（例如 `(BBC News, 2026)`）。絕對不准標註未在資料中出現的媒體或年份。
+3. 未在正文中實際引用其觀點的新聞，絕對不准提及。
 
-【過去 24 小時已報導過的話題清單（語義去重避開區）】：
+【已報導過的話題清單】：
 {avoid_list_str}
-※ 嚴格規定：除非上述舊話題發生了重大新轉折，否則請絕對避開重複報導！
 
-【可用的嚴格查證新聞池】：
+【可用的查證新聞池】：
 {combined_news}
 
-【五段式結構要求】：
-請從中挑選 2 件最具影響力的跨領域大事（【焦點一】與【焦點二】），嚴格依序輸出五個區塊（無星號、無井字號）：
+請挑選 2 件最具影響力的大事（【焦點一】與【焦點二】），嚴格依序輸出五個區塊（無星號、無井字號）：
 【焦點一：（填入對應分類名稱）】
-1. 🔥 頭條焦點秒懂：... (必須附上正確的 APA 文內引用)
-2. 💡 專家白話解說：... (必須附上 APA 文內引用)
-3. 🗣️ 輿論與市場風向：... (必須附上 APA 文內引用)
+1. 🔥 頭條焦點秒懂：... (必須附上正確 APA 引用)
+2. 💡 專家白話解說：... (必須附上 APA 引用)
+3. 🗣️ 輿論與市場風向：... (必須附上 APA 引用)
 4. 🔮 未來潛在影響：...
 5. 📜 歷史借鏡與參考：...
 
@@ -380,7 +378,7 @@ COVERED_TOPICS: 焦點一核心關鍵詞(4-8字), 焦點二核心關鍵詞(4-8�
         res = client.chat.completions.create(
             model="deepseek-chat",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.2, # 降低隨機性，防止幻覺
+            temperature=0.2,
             max_tokens=2100
         ).choices[0].message.content.strip()
         return res
@@ -400,7 +398,7 @@ def analyze_daily_24h_digest(daily_pool, current_trends, latest_news_text):
 
     prompt = f"""
 你現在是「全球情報總編輯」，現在是香港時間早上 07:00。
-請撰寫一份涵蓋 15 大領域的【過去 24 小時全球 Hot Topic 深度大整合】，嚴格遵守事實查證，絕不捏造幻覺。
+請撰寫一份涵蓋 15 大領域的【過去 24 小時全球 Hot Topic 深度大整合】，嚴格遵守事實查證。
 
 【熱搜風向】：{trends_str}
 【過去累積重大事件紀錄】：{accumulated_text}
@@ -426,7 +424,7 @@ def analyze_daily_24h_digest(daily_pool, current_trends, latest_news_text):
         return ""
 
 # ==========================================
-# 8. Telegram 推播模組 (實施 Python 程式端強制反幻覺過濾閘道)
+# 8. Telegram 推播模組 (防幻覺過濾閘道)
 # ==========================================
 def send_telegram_html(briefing_text, reference_items, is_daily_morning=False):
     clean_body = briefing_text
@@ -446,18 +444,14 @@ def send_telegram_html(briefing_text, reference_items, is_daily_morning=False):
     else:
         header = f"🌐 <b>15大領域全球情報綜合簡報</b> ({hk_time} HKT)\n\n"
     
-    # ── 【核心防盲目聚合閘道：Python 程式嚴格過濾】 ──
-    # 1. 掃描正文中實際出現過的所有括號內引用字串 (例如 "(BBC News, 2026)" 抓出 "bbc news")
     found_citations_raw = re.findall(r"\(([^0-9\(\)]+?),\s*\d{4}\)", clean_body)
     found_citations_normalized = {c.strip().lower() for c in found_citations_raw}
     
     matched_refs = []
     for item in reference_items:
-        # 2. 只有當該文獻的 author_key 確實被正文括號引用時，才准放入文末 References！
         if item.get('author_key', '') in found_citations_normalized or is_daily_morning:
             matched_refs.append(item['apa_ref'])
             
-    # 如果常規快報中 AI 漏掉括號標記，退回嚴格顯示正文前 2 筆被實際比對到的文獻，絕不盲目塞入 10 幾篇
     if not matched_refs and not is_daily_morning:
         matched_refs.append(reference_items[0]['apa_ref'])
 
@@ -475,7 +469,7 @@ def send_telegram_html(briefing_text, reference_items, is_daily_morning=False):
         payload = {"chat_id": TELEGRAM_CHAT_ID, "text": full_message, "parse_mode": "HTML", "disable_web_page_preview": True}
         res = requests.post(url, data=payload)
         if res.status_code == 200:
-            print("📱 已成功發送反幻覺過濾後的簡報至 Telegram！")
+            print("📱 已成功發送簡報至 Telegram！")
         else:
             print(f"❌ Telegram 發送失敗: {res.text}")
     else:
@@ -484,7 +478,7 @@ def send_telegram_html(briefing_text, reference_items, is_daily_morning=False):
         requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": part1[:4050], "parse_mode": "HTML", "disable_web_page_preview": True})
         time.sleep(1)
         requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": part2[:4050], "parse_mode": "HTML", "disable_web_page_preview": True})
-        print("📱 已成功分段發送反幻覺報告與參考文獻！")
+        print("📱 已成功分段發送報告與參考文獻！")
         
     return extracted_topics, clean_body
 
@@ -496,7 +490,7 @@ if __name__ == "__main__":
     hk_hour = hk_now.hour
     hk_time_str = hk_now.strftime("%Y-%m-%d %H:%M")
     
-    print(f"🚀 啟動 15 大領域反幻覺情報引擎 | 當前香港時間：{hk_time_str}")
+    print(f"🚀 啟動 15 大領域情報引擎 | 當前香港時間：{hk_time_str}")
     history = load_history()
     recent_topics = load_recent_topics()
     hot_keywords, ordered_trends = fetch_realtime_hot_keywords()
