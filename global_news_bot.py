@@ -11,11 +11,14 @@ from bs4 import BeautifulSoup
 from openai import OpenAI
 
 # ==========================================
-# 1. API 與系統設定 (優先從環境變數讀取 GitHub Secrets)
+# 1. API 與系統設定 (嚴格從 GitHub Secrets 安全讀取)
 # ==========================================
-DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY") or "sk-517d8baa3a174590a5a8bedfe5b3b236"
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN") or "9106778418:AAEDd0O_Wpwd7rAojcaOodlAVdDzjP1G0r8"
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID") or "1290187511"
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+
+if not DEEPSEEK_API_KEY or not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+    raise ValueError("❌ 錯誤：找不到必要的環境變數金鑰！請確認 GitHub 專案的 Secrets 是否已正確設定 DEEPSEEK_API_KEY、TELEGRAM_TOKEN 與 TELEGRAM_CHAT_ID。")
 
 SENT_LOG_FILE = "sent_global_news.txt"
 TOPIC_MEMORY_FILE = "covered_topics.json"
@@ -337,7 +340,7 @@ def fetch_article_content(url):
         return ""
 
 # ==========================================
-# 7A. 每小時常規模式
+# 6. DeepSeek 分析引擎
 # ==========================================
 def analyze_hourly_news(combined_news, recent_topics):
     avoid_list_str = "、".join([r["topic"] for r in recent_topics]) if recent_topics else "無"
@@ -386,9 +389,6 @@ COVERED_TOPICS: 焦點一核心關鍵詞(4-8字), 焦點二核心關鍵詞(4-8�
         print(f"❌ DeepSeek 分析失敗: {e}")
         return ""
 
-# ==========================================
-# 7B. 早上 07:00 晨間特別版
-# ==========================================
 def analyze_daily_24h_digest(daily_pool, current_trends, latest_news_text):
     pool_summary = []
     for entry in daily_pool:
@@ -424,7 +424,7 @@ def analyze_daily_24h_digest(daily_pool, current_trends, latest_news_text):
         return ""
 
 # ==========================================
-# 8. Telegram 推播模組 (防幻覺過濾閘道)
+# 7. Telegram 推播模組
 # ==========================================
 def send_telegram_html(briefing_text, reference_items, is_daily_morning=False):
     clean_body = briefing_text
@@ -483,7 +483,7 @@ def send_telegram_html(briefing_text, reference_items, is_daily_morning=False):
     return extracted_topics, clean_body
 
 # ==========================================
-# 9. 主程式
+# 8. 主程式
 # ==========================================
 if __name__ == "__main__":
     hk_now = datetime.utcnow() + timedelta(hours=8)
